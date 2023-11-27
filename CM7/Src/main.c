@@ -55,9 +55,11 @@
 FDCAN_HandleTypeDef hfdcan1;
 
 SPI_HandleTypeDef hspi1;
+SPI_HandleTypeDef hspi3;
 
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim17;
 
 UART_HandleTypeDef huart3;
 
@@ -84,13 +86,6 @@ const osThreadAttr_t TaskESC_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
-osThreadId_t TaskHandleIMU;
-const osThreadAttr_t TaskIMU_attributes = {
-  .name = "TaskIMU",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-
 osThreadId_t TaskHandleWireless;
 const osThreadAttr_t TaskWireless_attributes = {
   .name = "TaskWireless",
@@ -105,6 +100,12 @@ const osThreadAttr_t TaskCAN_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+FDCAN_FilterTypeDef sFilterConfig;
+FDCAN_TxHeaderTypeDef TxHeader;
+FDCAN_RxHeaderTypeDef RxHeader;
+uint8_t TxData[8] = {0x10, 0x34, 0x54, 0x76, 0x98, 0x00, 0x11, 0x22};
+uint8_t RxData[8];
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -115,14 +116,16 @@ static void MX_TIM3_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_FDCAN1_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_TIM17_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 void taskServo(void *argument);
 void taskESC(void *argument);
-void taskIMU(void *argument);
 void taskWireless(void *argument);
 void taskCAN(void *argument);
+
+
 
 /* USER CODE END PFP */
 
@@ -130,6 +133,15 @@ void taskCAN(void *argument);
 /* USER CODE BEGIN 0 */
 uint64_t RxpipeAddrs = 0x11223344AA;
 char myRxData[50];
+
+/*
+void mpu9250_read (uint8_t reg, uint8_t *data, uint8_t len);
+void mpu9250_write (uint8_t reg, uint8_t data);
+
+GPIO_TypeDef* cs_gpio_port;
+uint16_t cs_gpio_pin;
+SPI_HandleTypeDef* hspi;
+*/
 
 /* USER CODE END 0 */
 
@@ -195,6 +207,7 @@ Error_Handler();
   MX_SPI1_Init();
   MX_FDCAN1_Init();
   MX_USART3_UART_Init();
+  MX_TIM17_Init();
   /* USER CODE BEGIN 2 */
   //esc y servo
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
@@ -239,7 +252,6 @@ Error_Handler();
   /* add threads, ... */
   TaskHandleServo = osThreadNew(taskServo, NULL, &TaskServo_attributes);
   TaskHandleESC = osThreadNew(taskESC, NULL, &TaskESC_attributes);
-  TaskHandleIMU = osThreadNew(taskIMU, NULL, &TaskIMU_attributes);
   TaskHandleWireless = osThreadNew(taskWireless, NULL, &TaskWireless_attributes);
   TaskHandleCAN = osThreadNew(taskCAN, NULL, &TaskCAN_attributes);
   /* USER CODE END RTOS_THREADS */
@@ -292,13 +304,13 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 9;
+  RCC_OscInitStruct.PLL.PLLN = 10;
   RCC_OscInitStruct.PLL.PLLP = 2;
-  RCC_OscInitStruct.PLL.PLLQ = 3;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
   RCC_OscInitStruct.PLL.PLLR = 2;
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOMEDIUM;
-  RCC_OscInitStruct.PLL.PLLFRACN = 3072;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -355,7 +367,7 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.MessageRAMOffset = 0;
   hfdcan1.Init.StdFiltersNbr = 1;
   hfdcan1.Init.ExtFiltersNbr = 0;
-  hfdcan1.Init.RxFifo0ElmtsNbr = 0;
+  hfdcan1.Init.RxFifo0ElmtsNbr = 1;
   hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
   hfdcan1.Init.RxFifo1ElmtsNbr = 0;
   hfdcan1.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
@@ -371,7 +383,45 @@ static void MX_FDCAN1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN FDCAN1_Init 2 */
+  /* Configure Rx filter */
+    sFilterConfig.IdType = FDCAN_STANDARD_ID;
+    sFilterConfig.FilterIndex = 0;
+    sFilterConfig.FilterType = FDCAN_FILTER_MASK;
+    sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
 
+    //configuración para dejar pasar todos los códigos
+    sFilterConfig.FilterID1 = 0x00; //FILTRO
+    sFilterConfig.FilterID2 = 0x00; //MASCARA
+
+    //para dejar pasar algunos en específico, depende de los valores que vamos a dejar pasar. Filtro -> 0x4FF y Máscara->0xF00
+
+    /* Configure global filter to reject all non-matching frames */
+    HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT, FDCAN_REJECT_REMOTE,
+    FDCAN_REJECT_REMOTE);
+    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
+    {
+    /* Filter configuration Error */
+    Error_Handler();
+    }
+    /* Start the FDCAN module */
+    if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) {
+    }
+    /* Start Error */
+    if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) !=
+    HAL_OK) {
+    }
+    /* Notification Error */
+    /* Configure Tx buffer message */
+    TxHeader.Identifier = 0x111;
+    TxHeader.IdType = FDCAN_STANDARD_ID;
+    TxHeader.TxFrameType = FDCAN_DATA_FRAME;
+    TxHeader.DataLength = FDCAN_DLC_BYTES_12;
+    TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    TxHeader.BitRateSwitch = FDCAN_BRS_ON;
+    TxHeader.FDFormat = FDCAN_FD_CAN;
+    TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+    TxHeader.MessageMarker = 0x00;
+    /*AAO-*/
   /* USER CODE END FDCAN1_Init 2 */
 
 }
@@ -421,6 +471,54 @@ static void MX_SPI1_Init(void)
   /* USER CODE BEGIN SPI1_Init 2 */
 
   /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
+  * @brief SPI3 Initialization Function
+  * @param None
+  * @retval None
+  */
+void MX_SPI3_Init(void)
+{
+
+  /* USER CODE BEGIN SPI3_Init 0 */
+
+  /* USER CODE END SPI3_Init 0 */
+
+  /* USER CODE BEGIN SPI3_Init 1 */
+
+  /* USER CODE END SPI3_Init 1 */
+  /* SPI3 parameter configuration*/
+  hspi3.Instance = SPI3;
+  hspi3.Init.Mode = SPI_MODE_MASTER;
+  hspi3.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi3.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi3.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi3.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi3.Init.NSS = SPI_NSS_SOFT;
+  hspi3.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi3.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi3.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi3.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi3.Init.CRCPolynomial = 0x0;
+  hspi3.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
+  hspi3.Init.NSSPolarity = SPI_NSS_POLARITY_LOW;
+  hspi3.Init.FifoThreshold = SPI_FIFO_THRESHOLD_01DATA;
+  hspi3.Init.TxCRCInitializationPattern = SPI_CRC_INITIALIZATION_ALL_ZERO_PATTERN;
+  hspi3.Init.RxCRCInitializationPattern = SPI_CRC_INITIALIZATION_ALL_ZERO_PATTERN;
+  hspi3.Init.MasterSSIdleness = SPI_MASTER_SS_IDLENESS_00CYCLE;
+  hspi3.Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
+  hspi3.Init.MasterReceiverAutoSusp = SPI_MASTER_RX_AUTOSUSP_DISABLE;
+  hspi3.Init.MasterKeepIOState = SPI_MASTER_KEEP_IO_STATE_DISABLE;
+  hspi3.Init.IOSwap = SPI_IO_SWAP_DISABLE;
+  if (HAL_SPI_Init(&hspi3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI3_Init 2 */
+
+  /* USER CODE END SPI3_Init 2 */
 
 }
 
@@ -543,6 +641,38 @@ static void MX_TIM3_Init(void)
 }
 
 /**
+  * @brief TIM17 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM17_Init(void)
+{
+
+  /* USER CODE BEGIN TIM17_Init 0 */
+
+  /* USER CODE END TIM17_Init 0 */
+
+  /* USER CODE BEGIN TIM17_Init 1 */
+
+  /* USER CODE END TIM17_Init 1 */
+  htim17.Instance = TIM17;
+  htim17.Init.Prescaler = 0;
+  htim17.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim17.Init.Period = 65535;
+  htim17.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim17.Init.RepetitionCounter = 0;
+  htim17.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim17) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM17_Init 2 */
+
+  /* USER CODE END TIM17_Init 2 */
+
+}
+
+/**
   * @brief USART3 Initialization Function
   * @param None
   * @retval None
@@ -609,6 +739,42 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+StreamBufferHandle_t xStreamBuffer;
+
+typedef struct {
+    int accelX_data;
+    int accelY_data;
+    int accelZ_data;
+} AccelerometerData;
+
+void vAFunction (StreamBufferHandle_t xStreamBuffer, AccelerometerData *dataToPrint){
+	//uint8_t ucRxData[4];
+	size_t xReceivedBytes;
+
+	const TickType_t xBlockTime = pdMS_TO_TICKS(20);
+    xReceivedBytes = xStreamBufferReceive(xStreamBuffer, (void *)dataToPrint, sizeof(AccelerometerData), xBlockTime);
+    //Descomentar
+    //printf("Received IMU Data: X=%d, Y=%d, Z=%d\r\n", dataToPrint->accelX_data, dataToPrint->accelY_data, dataToPrint->accelZ_data);
+    //double dataToPrint;
+	//memcpy(&dataToPrint, ucRxData, sizeof(dataToPrint));
+}
+
+/*
+void mpu9250_write_register(uint8_t reg, uint8_t data){
+	HAL_GPIO_WritePin(cs_gpio_port, cs_gpio_pin, GPIO_PIN_RESET);
+	HAL_SPI_Transmit(&hspi3, &reg, 1, 100);
+	HAL_SPI_Transmit(&hspi3, &data, 1, 100);
+	HAL_GPIO_WritePin(cs_gpio_port,cs_gpio_pin, GPIO_PIN_SET);
+}
+
+void mpu9250_read_register(uint8_t reg, uint8_t *data, uint8_t len){
+	uint8_t _address = 0x80|reg; // Set MSB to 1 for reading
+	HAL_GPIO_WritePin(cs_gpio_port, cs_gpio_pin, GPIO_PIN_RESET);
+	HAL_SPI_Transmit(&hspi3, &_address , 1, 100);
+	HAL_SPI_Receive(&hspi3, data, len, 100);
+	HAL_GPIO_WritePin(cs_gpio_port, cs_gpio_pin, GPIO_PIN_SET);
+}*/
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -657,22 +823,11 @@ void taskESC(void *argument)
 	  i = 0.01;
 	  pulseWidth = 1;
   }
+
   /* USER CODE END 5 */
 }
 
-void taskIMU(void *argument)
-{
-  /* USER CODE BEGIN 5 */
 
-  /* Infinite loop */
-  for(;;)
-  {
-
-  }
-  /* USER CODE END 5 */
-}
-
-StreamBufferHandle_t xStreamBuffer;
 void taskWireless(void *argument)
 {
   /* USER CODE BEGIN 5 */
@@ -692,9 +847,17 @@ void taskWireless(void *argument)
   }
   vAFunction(xStreamBuffer);
 */
+	//HAL_TIM_Base_Start(&htim16);
+	//int16_t start_t= __HAL_TIM_GET_COUNTER(&htim16);
+
+	xStreamBuffer=xStreamBufferCreate(20, 20);
+	//int dataToPrint;
+	AccelerometerData receivedData;
+
   /* Infinite loop */
   for(;;)
   {
+
 	  if(NRF24_available())
 	  {
 		NRF24_read(myRxData, 32);
@@ -702,9 +865,12 @@ void taskWireless(void *argument)
 		myRxData[32] = '\r'; myRxData[32+1] = '\n';
 		printf("Coordenadas: %d %d %d %d %d %d %d\r\n", myRxData[0], myRxData[1], myRxData[2], myRxData[3], myRxData[4], myRxData[5], myRxData[6]);
 	  }
+	  vAFunction(xStreamBuffer, &receivedData);
+
   }
   /* USER CODE END 5 */
 }
+
 
 void taskCAN(void *argument)
 {
@@ -713,10 +879,18 @@ void taskCAN(void *argument)
   /* Infinite loop */
   for(;;)
   {
+	  printf("hola CAN \n\r");
+	  while (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &RxHeader, RxData) != HAL_OK);
+      printf("hola2 CAN \n\r");
+	  HAL_Delay(10);
+	  printf("\n\rCAN ID: %lx", RxHeader.Identifier);
 
-  }
+      printf(" %02X %02X %02X %02X",RxData[0], RxData[1], RxData[2], RxData[3]);
+      HAL_Delay(100); /*AAO-*/
+	  }
+ }
   /* USER CODE END 5 */
-}
+
 
 
 /* USER CODE END Header_StartDefaultTask */
